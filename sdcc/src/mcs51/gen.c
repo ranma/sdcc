@@ -5365,6 +5365,26 @@ genPlusIncr (iCode * ic)
       symbol *tlbl;
       const char *l;
 
+      l = opGet (IC_RESULT (ic), LSB, FALSE, FALSE);
+      if (size == 2 && icount < 8 && rtrackRegEq (l, "dpl"))
+        {
+          char *llo = Safe_strdup(l);
+          /* if current value is equal to DPTR value */
+          const char *lhi = opGet (IC_RESULT (ic), MSB16, FALSE, FALSE);
+          if (rtrackRegEq (lhi, "dph"))
+            {
+              D (emitcode (";", "genPlusIncrDPTR"));
+              while (icount--)
+                emitcode ("inc", "dptr");
+              emitcode ("mov", "%s, dpl", llo);
+              emitcode ("mov", "%s, dph", lhi);
+
+              Safe_free(llo);
+              return TRUE;
+            }
+          Safe_free(llo);
+        }
+
       tlbl = newiTempLabel (NULL);
       l = opGet (IC_RESULT (ic), LSB, FALSE, FALSE);
       emitcode ("inc", "%s", l);

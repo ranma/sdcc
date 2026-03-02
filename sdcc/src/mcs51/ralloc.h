@@ -58,6 +58,7 @@ typedef struct reg_info
 
   struct
   {
+    unsigned long equalRegs;    /* bitmask managed by rtrack.c */
     unsigned valueKnown:1;
     unsigned char value;        /* only valid when valueKnown is set */
     char *symbol;               /* holds symbol if value is known by symbol */

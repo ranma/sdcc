@@ -20,9 +20,10 @@
 
 bool _mcs51_rtrackUpdate (const char *line);
 
-char * rtrackGetLit(const char *x);
+const char * rtrackGetLit(const char *x);
 
 int rtrackMoveALit (const char *x);
+bool rtrackRegEq(const char *a, const char *b);
 
 void rtrackLoadDptrWithSym (const char *x);
 void rtrackLoadR0R1WithSym (const char *reg, const char *x);

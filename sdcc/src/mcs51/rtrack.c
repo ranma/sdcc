@@ -48,6 +48,8 @@
 
 #define D(x)  do if (options.verboseAsm) {x;} while(0)
 #define DD(x) do if (options.verboseAsm && enableextraverbose) {x;} while(0)
+#define RTRACK_EQREGS(idx) (regs8051[idx].rtrack.equalRegs)
+#define RTRACK_EQ(a, b) ((RTRACK_EQREGS(a) & (1 << (b))) && (RTRACK_EQREGS(b) & (1 << (a))))
 
 
 /* move this (or rtrackGetLit() and rtrackMoveALit()
@@ -69,6 +71,66 @@ static unsigned int rx_num_to_idx (const unsigned int num)
   return regidx [num & 0x7];
 }
 
+static char rtrack_type (const unsigned int idx)
+{
+  assert (idx >= 0);
+  assert (idx < END_IDX);
+
+  if (regs8051[idx].rtrack.symbol)
+    return 's';
+  if (regs8051[idx].rtrack.valueKnown)
+    return 'v';
+  return 'u';
+}
+
+static void rtrack_clr_eq (const unsigned int a, const unsigned int b)
+{
+  if (a == b)
+    return;  // always equal to itself
+
+  assert (a >= 0);
+  assert (a < END_IDX);
+  assert (b >= 0);
+  assert (b < END_IDX);
+
+  if (!RTRACK_EQ(a, b))
+    return;
+
+  RTRACK_EQREGS (a) &= ~(1 << b);
+  RTRACK_EQREGS (b) &= ~(1 << a);
+
+  DD (emitcode (";", "\trtrack: %s(%c:%06x) != %s(%c:%06x)",
+                regs8051[a].name, rtrack_type(a), RTRACK_EQREGS (a),
+                regs8051[b].name, rtrack_type(b), RTRACK_EQREGS (b)));
+}
+
+static void rtrack_clr_eq_all (const unsigned int idx)
+{
+  assert (idx >= 0);
+  assert (idx < END_IDX);
+
+  if (!(RTRACK_EQREGS (idx) & ~(1 << idx)))
+    return;
+  for (int i = 0; i < END_IDX; i++)
+    rtrack_clr_eq (i, idx);
+}
+
+static void rtrack_mark_eq (const unsigned int a, const unsigned int b)
+{
+  assert (a >= 0);
+  assert (a < END_IDX);
+  assert (b >= 0);
+  assert (b < END_IDX);
+
+  if (RTRACK_EQ(a, b))
+    return;  // already marked
+
+  RTRACK_EQREGS (a) |= (1 << a) | (1 << b);
+  RTRACK_EQREGS (b) |= (1 << a) | (1 << b);
+  DD (emitcode (";", "\trtrack: %s(%c:%06x) = %s(%c:%06x)",
+                regs8051[a].name, rtrack_type(a), RTRACK_EQREGS (a),
+                regs8051[b].name, rtrack_type(b), RTRACK_EQREGS (b)));
+}
 
 static void rtrack_data_unset (const unsigned int idx)
 {
@@ -85,9 +147,11 @@ static void rtrack_data_unset (const unsigned int idx)
       Safe_free (regs8051[idx].rtrack.symbol);
     }
 
+  /* clear previous equality tracking before memset */
+  rtrack_clr_eq_all (idx);
   memset (&regs8051[idx].rtrack, 0, sizeof regs8051[idx].rtrack);
+  RTRACK_EQREGS (idx) = 1 << idx;  // always equal to itself
 }
-
 
 static void rtrack_data_set_val (const unsigned int idx, const unsigned char value)
 {
@@ -104,11 +168,37 @@ static void rtrack_data_set_val (const unsigned int idx, const unsigned char val
       regs8051[idx].rtrack.symbol = NULL;
     }
 
-  DD(emitcode (";", "\t%s=#0x%02x",
+  /* update equality tracker */
+  rtrack_clr_eq_all (idx);
+  for (int i = 0; i < END_IDX; i++)
+    {
+      if (regs8051[i].rtrack.valueKnown && regs8051[i].rtrack.value == value)
+        rtrack_mark_eq (i, idx);
+    }
+
+  DD(emitcode (";", "\t%s=#0x%02x (eqr:%06x)",
                     regs8051[idx].name,
-                    regs8051[idx].rtrack.value););
+                    regs8051[idx].rtrack.value,
+                    (int)RTRACK_EQREGS (idx)););
 }
 
+static void rtrack_data_set_val_deduced (const unsigned int idx, const unsigned char value)
+{
+  assert (idx >= 0);
+  assert (idx < END_IDX);
+
+  unsigned long equalRegs = RTRACK_EQREGS(idx);
+  unsigned long mask = 1;
+
+  rtrack_data_set_val(idx, value);
+
+  /* propagate known value into all registers in equality set */
+  for (int i = 0; i < END_IDX; i++, mask <<= 1)
+    {
+      if (equalRegs & mask)
+        rtrack_data_set_val(i, value);
+    }
+}
 
 static void rtrack_data_set_symbol (const unsigned int idx, const char * const symbol)
 {
@@ -126,18 +216,41 @@ static void rtrack_data_set_symbol (const unsigned int idx, const char * const s
     }
   regs8051[idx].rtrack.symbol = Safe_strdup(symbol);
 
-  DD(emitcode (";", "\t%s=#%s",
+  /* update equality tracker */
+  rtrack_clr_eq_all (idx);
+  for (int i = 0; i < END_IDX; i++)
+    {
+      if (regs8051[i].rtrack.symbol && strcmp (regs8051[i].rtrack.symbol, symbol) == 0)
+        rtrack_mark_eq (i, idx);
+    }
+
+  DD(emitcode (";", "\t%s=#%s (eqr:%06x)",
                     regs8051[idx].name,
-                    regs8051[idx].rtrack.symbol););
+                    regs8051[idx].rtrack.symbol,
+                    (int)RTRACK_EQREGS (idx)););
 }
 
 
-static int rtrack_data_is_same (const unsigned int idxdst, const unsigned int idxsrc)
+static bool rtrack_data_is_same (const unsigned int idxdst, const unsigned int idxsrc)
 {
   return ((regs8051[idxdst].rtrack.valueKnown && regs8051[idxsrc].rtrack.valueKnown) &&
           (regs8051[idxdst].rtrack.value      == regs8051[idxsrc].rtrack.value)) ||
          ((regs8051[idxdst].rtrack.symbol && regs8051[idxsrc].rtrack.symbol) &&
          !strcmp (regs8051[idxdst].rtrack.symbol, regs8051[idxsrc].rtrack.symbol));
+}
+
+
+bool rtrackRegEq(const char *aName, const char *bName)
+{
+  if (enable != 1 || !aName || !bName || *aName == '#' || *bName == '#')
+    return false;
+  int a = mcs51_regname_to_idx (aName);
+  int b = mcs51_regname_to_idx (bName);
+  if (a < 0 || b < 0)
+    return false;
+  if (RTRACK_EQ(a, b))
+    return true;
+  return rtrack_data_is_same(a, b);
 }
 
 
@@ -178,11 +291,21 @@ static void rtrack_data_copy_dst_src (const unsigned int idxdst, const unsigned 
       regs8051[idxdst].rtrack.symbol = NULL;
     }
 
+  /* clear previous equality tracking before memcpy */
+  rtrack_clr_eq_all (idxdst);
   memcpy (&regs8051[idxdst].rtrack, &regs8051[idxsrc].rtrack, sizeof regs8051[idxdst].rtrack);
 
   if (regs8051[idxsrc].rtrack.symbol)
     {
       regs8051[idxdst].rtrack.symbol = Safe_strdup(regs8051[idxsrc].rtrack.symbol);
+    }
+
+  /* update equality tracker */
+  rtrack_mark_eq (idxdst, idxsrc);
+  for (int i = 0; i < END_IDX; i++)
+    {
+      if (RTRACK_EQ (i, idxsrc))
+        rtrack_mark_eq (i, idxdst);
     }
 }
 
@@ -200,13 +323,15 @@ static void dumpAll()
       {
         if (regs8051[i].rtrack.valueKnown)
           {
-            column += sprintf(s + column, "%s%s:#0x%02x",
-                              column?" ":"", regs8051[i].name, regs8051[i].rtrack.value);
+            column += sprintf(s + column, "%s%s:#0x%02x:req%04x",
+                              column?" ":"", regs8051[i].name, regs8051[i].rtrack.value,
+                              (int)RTRACK_EQREGS (i));
           }
         if (NULL != regs8051[i].rtrack.symbol)
           {
-            column += sprintf(s + column, "%s%s:#%s",
-                              column?" ":"", regs8051[i].name, regs8051[i].rtrack.symbol);
+            column += sprintf(s + column, "%s%s:#%s:req%04x",
+                              column?" ":"", regs8051[i].name, regs8051[i].rtrack.symbol,
+                              (int)RTRACK_EQREGS (i));
           }
         if (column>160)
           {
@@ -637,7 +762,7 @@ bool _mcs51_rtrackUpdate (const char *line)
           /* check literal compare to register */
           if ((s != argument + 1) && !strncmp (argument, "#0x", 3))
             {
-               rtrack_data_set_val (regIdx, (unsigned char) value);
+               rtrack_data_set_val_deduced (regIdx, (unsigned char) value);
                return false;
             }
           rtrack_data_unset (regIdx);
@@ -949,7 +1074,7 @@ bool _mcs51_rtrackUpdate (const char *line)
    (mov a,r7 or add a,r7 need one byte whereas
     mov a,#0x01 or add a,#0x01 would take two
  */
-char * rtrackGetLit(const char *x)
+const char * rtrackGetLit(const char *x)
 {
   unsigned int i;
 
@@ -1081,7 +1206,7 @@ int rtrackMoveALit (const char *x)
 
           {
             unsigned int i;
-            char *ptr= rtrackGetLit(x);
+            const char *ptr= rtrackGetLit(x);
 
             if (x != ptr)
               {
