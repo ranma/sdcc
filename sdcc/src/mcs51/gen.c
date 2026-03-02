@@ -5353,6 +5353,18 @@ genPlusIncr (iCode * ic)
 
   icount = (unsigned int) ulFromVal (AOP (IC_RIGHT (ic))->aopu.aop_lit);
 
+  if (icount == 0)
+    {
+      // Const-1 addition was folded into previous op.
+      D (emitcode (";", "genPlusIncr icount == 0"));
+      if (!sameRegs (AOP (IC_LEFT (ic)), AOP (IC_RESULT (ic))))
+        {
+          for (offset = 0; offset < size; offset++)
+            opPut (IC_RESULT (ic), opGet (IC_LEFT (ic), offset, FALSE, FALSE), offset);
+        }
+      return TRUE;
+    }
+
   D (emitcode (";", "genPlusIncr"));
 
   /* if increment >=16 bits in register or direct space */
@@ -5517,7 +5529,7 @@ genPlusBits (iCode * ic)
 }
 
 static void
-adjustArithmeticResult (iCode * ic)
+adjustArithmeticGptrResult (iCode * ic)
 {
   if (opIsGptr (IC_RESULT (ic)))
     {
@@ -5570,6 +5582,7 @@ static void
 genPlus (iCode * ic)
 {
   int size, offset = 0;
+  int foldPostinc = 0;
   int skip_bytes = 0;
   char *add = "add";
   bool swappedLR = FALSE;
@@ -5583,6 +5596,17 @@ genPlus (iCode * ic)
   aopOp (IC_LEFT (ic), ic, FALSE);
   aopOp (IC_RIGHT (ic), ic, FALSE);
   aopOp (IC_RESULT (ic), ic, TRUE);
+
+  if (IS_ITEMP (IC_RESULT (ic)) &&
+      !SPIL_LOC (IC_RESULT (ic)) &&
+      ic->next->op == '+' &&
+      OP_KEY (IC_RESULT (ic)) == OP_KEY (IC_LEFT (ic->next)) &&
+      IS_OP_LITERAL (IC_RIGHT (ic->next)) &&
+      ullFromVal (OP_VALUE (IC_RIGHT (ic->next))) == 1)
+    {
+      /* special case for "a + b + 1" */
+      foldPostinc = 1;
+    }
 
   sym_link *resulttype = operandType (IC_RESULT (ic));
   unsigned topbytemask = (IS_BITINT (resulttype) && SPEC_USIGN (resulttype) && (SPEC_BITINTWIDTH (resulttype) % 8)) ?
@@ -5674,6 +5698,18 @@ genPlus (iCode * ic)
         D (emitcode (";", "genPlus shortcut"));
     }
 
+  if (foldPostinc && skip_bytes < 2)
+    skip_bytes = 0;  /* more savings from fold */
+
+  if (foldPostinc && skip_bytes == 0)
+    {
+      D (emitcode (";", "folding post-increment"));
+      SETC;
+      add = "addc";
+      /* change next to + 0 */
+      IC_RIGHT(ic->next) = operandFromLit(0);
+    }
+
   while (size--)
     {
       if (offset >= skip_bytes)
@@ -5714,9 +5750,8 @@ genPlus (iCode * ic)
       offset++;
     }
 
-  adjustArithmeticResult (ic);
-
 release:
+  adjustArithmeticGptrResult (ic);
   freeAsmop (IC_RESULT (ic), NULL, ic, TRUE);
   if (swappedLR)
     swapOperands (&IC_LEFT (ic), &IC_RIGHT (ic));
@@ -5743,6 +5778,19 @@ genMinusDec (iCode * ic)
      is greater than 4 then it is not worth it */
   if ((icount = (unsigned int) ullFromVal (AOP (IC_RIGHT (ic))->aopu.aop_lit)) > 4)
     return FALSE;
+
+  if (icount == 0)
+    {
+      // Const-1 subtraction was folded into previous op.
+      unsigned int offset;
+      D (emitcode (";", "genMinusDec icount == 0"));
+      if (!sameRegs (AOP (IC_LEFT (ic)), AOP (IC_RESULT (ic))))
+        {
+          for (offset = 0; offset < size; offset++)
+            opPut (IC_RESULT (ic), opGet (IC_LEFT (ic), offset, FALSE, FALSE), offset);
+        }
+      return TRUE;
+    }
 
   D (emitcode (";", "genMinusDec"));
 
@@ -5902,12 +5950,24 @@ static void
 genMinus (iCode * ic)
 {
   int size, offset = 0;
+  int foldPostdec = 0;
 
   D (emitcode (";", "genMinus"));
 
   aopOp (IC_LEFT (ic), ic, FALSE);
   aopOp (IC_RIGHT (ic), ic, FALSE);
   aopOp (IC_RESULT (ic), ic, TRUE);
+
+  if (IS_ITEMP(IC_RESULT(ic)) &&
+      !SPIL_LOC(IC_RESULT(ic)) &&
+      ic->next->op == '-' &&
+      OP_KEY(IC_RESULT(ic)) == OP_KEY(IC_LEFT(ic->next)) &&
+      IS_OP_LITERAL(IC_RIGHT(ic->next)) &&
+      ullFromVal(OP_VALUE(IC_RIGHT(ic->next))) == 1)
+    {
+      /* special case for "a - b - 1" */
+      foldPostdec = 1;
+    }
 
   sym_link *resulttype = operandType (IC_RESULT (ic));
   unsigned topbytemask = (IS_BITINT (resulttype) && SPEC_USIGN (resulttype) && (SPEC_BITINTWIDTH (resulttype) % 8)) ?
@@ -5991,7 +6051,19 @@ genMinus (iCode * ic)
                   pushedB = pushB ();
                   emitcode ("mov", "b,a");
                   if (offset == 0)
-                    CLRC;
+                    {
+                      if (foldPostdec)
+                        {
+                          D (emitcode (";", "folding post-decrement"));
+                          SETC;
+                          /* change next to - 0 */
+                          IC_RIGHT(ic->next) = operandFromLit(0);
+                        }
+                      else
+                        {
+                          CLRC;
+                        }
+                    }
                   MOVA (opGet (leftOp, offset, FALSE, FALSE));
                   emitcode ("subb", "a,b");
                   popB (pushedB);
@@ -6015,7 +6087,19 @@ genMinus (iCode * ic)
             {
               MOVA (opGet (leftOp, offset, FALSE, FALSE));
               if (offset == 0)
-                CLRC;
+                {
+                  if (foldPostdec)
+                    {
+                      D (emitcode (";", "folding post-decrement"));
+                      SETC;
+                      /* change next to - 0 */
+                      IC_RIGHT(ic->next) = operandFromLit(0);
+                    }
+                  else
+                    {
+                      CLRC;
+                    }
+                }
               emitcode ("subb", "a,%s", opGet (rightOp, offset, FALSE, FALSE));
             }
 
@@ -6025,9 +6109,8 @@ genMinus (iCode * ic)
         }
     }
 
-  adjustArithmeticResult (ic);
-
 release:
+  adjustArithmeticGptrResult (ic);
   freeAsmop (IC_RESULT (ic), NULL, ic, TRUE);
   freeAsmop (IC_RIGHT (ic), NULL, ic, (RESULTONSTACK (ic) ? FALSE : TRUE));
   freeAsmop (IC_LEFT (ic), NULL, ic, (RESULTONSTACK (ic) ? FALSE : TRUE));
@@ -12276,9 +12359,9 @@ genAssign (iCode * ic)
           offset++;
         }
     }
-  adjustArithmeticResult (ic);
 
 release:
+  adjustArithmeticGptrResult (ic);
   freeAsmop (result, NULL, ic, TRUE);
   freeAsmop (right, NULL, ic, TRUE);
 }
