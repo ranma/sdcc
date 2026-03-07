@@ -2012,17 +2012,7 @@ loadDptrFromOperand (operand *op, bool loadBToo)
               if (AOP (op)->aopu.aop_immd.from_cast_remat)
                 emitcode ("mov", "b,%s", opGet (op, AOP_SIZE (op) - 1, FALSE, FALSE));
               else
-                {
-                  wassertl (FALSE, "need pointerCode");
-                  emitcode (";", "mov b,???");
-                  /* genPointerGet and genPointerSet originally did different
-                   ** things for this case. Both seem wrong.
-                   ** from genPointerGet:
-                   **  emitcode ("mov", "b,#%d", pointerCode (retype));
-                   ** from genPointerSet:
-                   **  emitcode ("mov", "b,%s + 1", opGet (result, 0, TRUE, FALSE));
-                   */
-                }
+                emitcode ("mov", "b,#0x%02x", pointerTypeToGPByte (pointerCode (getSpec (operandType (op))), 0, 0));
             }
         }
       else if (AOP_TYPE (op) == AOP_LIT)
